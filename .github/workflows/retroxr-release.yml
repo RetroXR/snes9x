@@ -1,5 +1,5 @@
-# Build the retroXR snes9x core for Windows and Android and publish it as a
-# release, so retroXR's CoreDownloadManager can fetch it.
+# Build the retroXR snes9x core for Windows, Android, Linux and macOS and
+# publish it as a release, so retroXR's CoreDownloadManager can fetch it.
 #
 # This fork carries the Satellaview's 8M Memory Pack, which is what makes a BS-X
 # in retroXR a machine you can download to rather than a shell that pretends.
@@ -23,6 +23,10 @@
 #
 #   Windows  snes9x_libretro.dll.zip          containing snes9x_libretro.dll
 #   Android  snes9x_libretro_android.so.zip   containing snes9x_libretro_android.so
+#   Linux    snes9x_libretro.so.zip           containing snes9x_libretro.so
+#   macOS    snes9x_libretro_arm64.dylib.zip
+#            snes9x_libretro_x86_64.dylib.zip
+#              each containing snes9x_libretro.dylib
 #
 # Windows is cross-compiled from Ubuntu with mingw-w64 rather than built with
 # MSVC, because that is what libretro/Makefile's Windows branch is written for:
@@ -152,9 +156,106 @@ jobs:
           path: snes9x_libretro_android.so.zip
           if-no-files-found: error
 
+  # The oldest Ubuntu runner: a shared library loads only against a glibc at
+  # least as new as the one it was linked with.
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make zip
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Build
+        run: |
+          cd libretro
+          make platform=unix -j$(nproc)
+
+      - name: Package
+        run: |
+          mapfile -t hits < <(find libretro -maxdepth 1 -name 'snes9x_libretro.so' -type f)
+          if [ "${#hits[@]}" -ne 1 ]; then
+            echo "expected exactly one snes9x_libretro.so, found ${#hits[@]}:"
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          mkdir -p stage
+          cp "${hits[0]}" stage/snes9x_libretro.so
+          (cd stage && zip -q -X ../snes9x_libretro.so.zip snes9x_libretro.so)
+          file stage/snes9x_libretro.so
+          ls -lh snes9x_libretro.so.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: snes9x_libretro.so.zip
+          if-no-files-found: error
+
+  # Both architectures on one Apple Silicon runner. Unlike the other retroXR
+  # cores, libretro/Makefile's osx branch has no CROSS_COMPILE hook to apply a
+  # target triple, so the triple and SDK go in through the ENVIRONMENT: its
+  # CFLAGS/CXXFLAGS/LDFLAGS are only ever appended to, so an environment value
+  # survives, where the same thing on the command line would replace every
+  # flag the makefile adds. fpic is overridden because the branch otherwise
+  # appends -mmacosx-version-min=10.1 (its Mojave test reads the MINOR version
+  # of a macOS 14 runner), which fights the triple's own deployment target.
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-14
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            triple: arm64-apple-macos10.15
+          - arch: x86_64
+            triple: x86_64-apple-macos10.13
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Build
+        run: |
+          cd libretro
+          flags="-target ${{ matrix.triple }} -isysroot $(xcrun --sdk macosx --show-sdk-path)"
+          CFLAGS="$flags" CXXFLAGS="$flags" LDFLAGS="$flags" \
+            make platform=osx CC=clang CXX=clang++ fpic=-fPIC -j$(sysctl -n hw.ncpu)
+
+      - name: Package
+        run: |
+          lib=snes9x_libretro.dylib
+          mapfile -t hits < <(find libretro -maxdepth 1 -name "$lib" -type f)
+          if [ "${#hits[@]}" -ne 1 ]; then
+            echo "expected exactly one $lib, found ${#hits[@]}:"
+            printf '  %s\n' "${hits[@]}"
+            exit 1
+          fi
+          lipo -info "${hits[0]}"
+          if [ "$(lipo -archs "${hits[0]}")" != "${{ matrix.arch }}" ]; then
+            echo "$lib is not ${{ matrix.arch }}"
+            exit 1
+          fi
+          mkdir -p stage
+          cp "${hits[0]}" "stage/$lib"
+          (cd stage && zip -q -X ../snes9x_libretro_${{ matrix.arch }}.dylib.zip "$lib")
+          ls -lh snes9x_libretro_${{ matrix.arch }}.dylib.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: snes9x_libretro_${{ matrix.arch }}.dylib.zip
+          if-no-files-found: error
+
   publish:
     name: Publish release
-    needs: [windows, android]
+    needs: [windows, android, linux, macos]
     if: github.event_name == 'push' || github.event.inputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
@@ -174,8 +275,8 @@ jobs:
           cat > notes.md <<EOF
           snes9x libretro core built for retroXR, from \`$GITHUB_SHA\`.
 
-          Windows x86_64 and Android arm64-v8a. The source for these binaries is
-          this tag.
+          Windows x86_64, Android arm64-v8a, Linux x86_64 and macOS arm64 and
+          x86_64. The source for these binaries is this tag.
 
           Over the stock buildbot build this carries the Satellaview's 8M Memory
           Pack: its own memory id, savestate coverage, and flash erased to 0xFF
@@ -199,4 +300,7 @@ jobs:
           gh release upload "$TAG" \
             dist/snes9x_libretro.dll.zip \
             dist/snes9x_libretro_android.so.zip \
+            dist/snes9x_libretro.so.zip \
+            dist/snes9x_libretro_arm64.dylib.zip \
+            dist/snes9x_libretro_x86_64.dylib.zip \
             --repo "$GITHUB_REPOSITORY" --clobber
