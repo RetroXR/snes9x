@@ -207,7 +207,7 @@ jobs:
   # of a macOS 14 runner), which fights the triple's own deployment target.
   macos:
     name: macOS ${{ matrix.arch }}
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         include:
