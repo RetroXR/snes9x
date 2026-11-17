@@ -7,6 +7,7 @@
 #include <qnamespace.h>
 #include <QStyle>
 #include <QStyleHints>
+#include <QCommandLineParser>
 
 #ifndef _WIN32
 #include <csignal>
@@ -25,11 +26,21 @@ int main(int argc, char *argv[])
     EmuApplication emu;
     emu.qtapp = std::make_unique<QApplication>(argc, argv);
 
+    QCommandLineParser parser;
+    parser.addHelpOption();
+    parser.addVersionOption();
+    QCommandLineOption dark_option("dark");
+    dark_option.setDescription(QObject::tr("Use the built in dark fusion theme for the GUI."));
+
+    parser.addOption(dark_option);
+    parser.addPositionalArgument("filename", "ROM file name");
+    parser.process(emu.qtapp->arguments());
+
     QGuiApplication::setDesktopFileName("snes9x-qt");
 
-    if (QApplication::platformName() == "windows")
+    if (QApplication::platformName() == "windows" || parser.isSet("dark"))
     {
-        if (QApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark)
+        if (QApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark || parser.isSet("dark"))
         {
             QApplication::setStyle("fusion");
 
@@ -80,11 +91,23 @@ int main(int argc, char *argv[])
     emu.config->loadFile(EmuConfig::findConfigFile());
 
     emu.input_manager = std::make_unique<SDLInputManager>();
-    emu.window = std::make_unique<EmuMainWindow>(&emu);
+    emu.window = std::make_unique<EmuMainWindow>(emu);
     emu.window->show();
 
     emu.updateBindings();
     emu.startInputTimer();
+
+    if (!parser.positionalArguments().empty())
+    {
+        QTimer *timer = new QTimer();
+        timer->setTimerType(Qt::CoarseTimer);
+        timer->setSingleShot(true);
+        timer->callOnTimeout([&] {
+            emu.window->openFile(parser.positionalArguments().front().toStdString());
+        });
+        timer->start();
+    }
+
     emu.qtapp->exec();
 
     emu.stopThread();
